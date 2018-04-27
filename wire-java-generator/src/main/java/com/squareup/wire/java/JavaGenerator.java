@@ -123,6 +123,7 @@ public final class JavaGenerator {
           .build();
 
   private static final String URL_CHARS = "[-!#$%&'()*+,./0-9:;=?@A-Z\\[\\]_a-z~]";
+  private static final int MAX_ARGUMENT_COUNT = 254;
 
   /**
    * Preallocate all of the names we'll need for {@code type}. Names are allocated in precedence
@@ -893,15 +894,20 @@ public final class JavaGenerator {
     MethodSpec.Builder result = MethodSpec.constructorBuilder();
     result.addModifiers(PUBLIC);
     result.addCode("this(");
-    for (Field field : type.fieldsAndOneOfFields()) {
-      TypeName javaType = fieldType(field);
-      String fieldName = nameAllocator.get(field);
-      ParameterSpec.Builder param = ParameterSpec.builder(javaType, fieldName);
-      if (emitAndroid && field.isOptional()) {
-        param.addAnnotation(NULLABLE);
+    if (type.fieldsAndOneOfFields().size() < MAX_ARGUMENT_COUNT) {
+      for (Field field : type.fieldsAndOneOfFields()) {
+        TypeName javaType = fieldType(field);
+        String fieldName = nameAllocator.get(field);
+        ParameterSpec.Builder param = ParameterSpec.builder(javaType, fieldName);
+        if (emitAndroid && field.isOptional()) {
+          param.addAnnotation(NULLABLE);
+        }
+        result.addParameter(param.build());
+        result.addCode("$L, ", fieldName);
       }
-      result.addParameter(param.build());
-      result.addCode("$L, ", fieldName);
+    } else {
+      result.addParameter(BUILDER, "builder");
+      result.addCode("builder, ");
     }
     result.addCode("$T.EMPTY);\n", BYTE_STRING);
     return result.build();
@@ -925,37 +931,51 @@ public final class JavaGenerator {
         .addModifiers(PUBLIC)
         .addStatement("super($N, $N)", adapterName, unknownFieldsName);
 
-    for (OneOf oneOf : type.oneOfs()) {
-      if (oneOf.fields().size() < 2) continue;
-      CodeBlock.Builder fieldNamesBuilder = CodeBlock.builder();
-      boolean first = true;
-      for (Field field : oneOf.fields()) {
-        if (!first) fieldNamesBuilder.add(", ");
-        fieldNamesBuilder.add("$N", localNameAllocator.get(field));
-        first = false;
+    if (type.fieldsAndOneOfFields().size() < MAX_ARGUMENT_COUNT) {
+      for (OneOf oneOf : type.oneOfs()) {
+        if (oneOf.fields().size() < 2) continue;
+        CodeBlock.Builder fieldNamesBuilder = CodeBlock.builder();
+        boolean first = true;
+        for (Field field : oneOf.fields()) {
+          if (!first) fieldNamesBuilder.add(", ");
+          fieldNamesBuilder.add("$N", localNameAllocator.get(field));
+          first = false;
+        }
+        CodeBlock fieldNames = fieldNamesBuilder.build();
+        result.beginControlFlow("if ($T.countNonNull($L) > 1)", Internal.class, fieldNames);
+        result.addStatement("throw new IllegalArgumentException($S)",
+            "at most one of " + fieldNames + " may be non-null");
+        result.endControlFlow();
       }
-      CodeBlock fieldNames = fieldNamesBuilder.build();
-      result.beginControlFlow("if ($T.countNonNull($L) > 1)", Internal.class, fieldNames);
-      result.addStatement("throw new IllegalArgumentException($S)",
-          "at most one of " + fieldNames + " may be non-null");
-      result.endControlFlow();
+      for (Field field : type.fieldsAndOneOfFields()) {
+        TypeName javaType = fieldType(field);
+        String fieldName = localNameAllocator.get(field);
+        ParameterSpec.Builder param = ParameterSpec.builder(javaType, fieldName);
+        if (emitAndroid && field.isOptional()) {
+          param.addAnnotation(NULLABLE);
+        }
+        result.addParameter(param.build());
+        if (field.isRepeated() || field.type().isMap()) {
+          result.addStatement("this.$1L = $2T.immutableCopyOf($1S, $1L)", fieldName,
+              Internal.class);
+        } else {
+          result.addStatement("this.$1L = $1L", fieldName);
+        }
+      }
+    } else {
+      result.addParameter(BUILDER, "builder");
+      result.addStatement("Builder myBuilder = (Builder)builder");
+      for (Field field : type.fieldsAndOneOfFields()) {
+        TypeName javaType = fieldType(field);
+        String fieldName = localNameAllocator.get(field);
+        if (field.isRepeated() || field.type().isMap()) {
+          result.addStatement("this.$1L = $2T.immutableCopyOf($1S, $1L)", fieldName,
+              Internal.class);
+        } else {
+          result.addStatement("this.$1L = myBuilder.$1L", fieldName);
+        }
+      }
     }
-    for (Field field : type.fieldsAndOneOfFields()) {
-      TypeName javaType = fieldType(field);
-      String fieldName = localNameAllocator.get(field);
-      ParameterSpec.Builder param = ParameterSpec.builder(javaType, fieldName);
-      if (emitAndroid && field.isOptional()) {
-        param.addAnnotation(NULLABLE);
-      }
-      result.addParameter(param.build());
-      if (field.isRepeated() || field.type().isMap()) {
-        result.addStatement("this.$1L = $2T.immutableCopyOf($1S, $1L)", fieldName,
-            Internal.class);
-      } else {
-        result.addStatement("this.$1L = $1L", fieldName);
-      }
-    }
-
     result.addParameter(BYTE_STRING, unknownFieldsName);
 
     return result.build();
@@ -1248,8 +1268,12 @@ public final class JavaGenerator {
     }
 
     result.addCode("return new $T(", javaType);
-    for (Field field : message.fieldsAndOneOfFields()) {
-      result.addCode("$L, ", nameAllocator.get(field));
+    if (message.fieldsAndOneOfFields().size() < MAX_ARGUMENT_COUNT) {
+      for (Field field : message.fieldsAndOneOfFields()) {
+        result.addCode("$L, ", nameAllocator.get(field));
+      }
+    } else {
+      result.addCode("this, ");
     }
     result.addCode("super.buildUnknownFields());\n");
     return result.build();
